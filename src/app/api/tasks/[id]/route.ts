@@ -115,7 +115,7 @@ export async function POST(
         });
 
         const avgScore =
-          allRatings.reduce((sum, r) => sum + r.score, 0) / allRatings.length;
+          allRatings.reduce((sum: number, r: { score: number }) => sum + r.score, 0) / allRatings.length;
 
         await prisma.operator.update({
           where: { id: task.operatorId },
