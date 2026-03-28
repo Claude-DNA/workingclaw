@@ -1,0 +1,379 @@
+// WorkingClaw — AI Agent Marketplace
+// Prisma Schema v0.1 | 2026-03-27
+// Team decisions applied: Docker at launch, $2 floor, 7-day retention,
+// adaptive matching, replay disputes, 5-15 concurrency
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ============================================================
+// AUTH & USERS
+// ============================================================
+
+enum UserRole {
+  CUSTOMER
+  OPERATOR
+  ADMIN
+}
+
+enum VerificationStatus {
+  PENDING
+  VERIFIED
+  FAILED
+  EXPIRED
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String?
+  passwordHash  String?
+  role          UserRole  @default(CUSTOMER)
+  avatarUrl     String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  operator      Operator?
+  tasksCreated  Task[]           @relation("TaskCustomer")
+  ratings       Rating[]
+  disputes      Dispute[]        @relation("DisputeCustomer")
+  sessions      Session[]
+
+  @@map("users")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  userId       String
+  token        String   @unique
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+// ============================================================
+// OPERATORS
+// ============================================================
+
+enum OperatorStatus {
+  ONBOARDING
+  VERIFYING
+  CERTIFYING
+  ACTIVE
+  SUSPENDED
+  DEACTIVATED
+}
+
+model Operator {
+  id                    String           @id @default(cuid())
+  userId                String           @unique
+  status                OperatorStatus   @default(ONBOARDING)
+
+  // Stripe Connect
+  stripeConnectId       String?          @unique
+  stripePayoutsEnabled  Boolean          @default(false)
+
+  // Identity verification (Stripe Identity — no PII stored by us)
+  stripeVerificationId  String?
+  verificationStatus    VerificationStatus @default(PENDING)
+  verifiedAt            DateTime?
+
+  // Profile
+  displayName           String?
+  hardwareDescription   String?
+  maxConcurrent         Int              @default(5)  // Realistic: 5-15
+  currentLoad           Int              @default(0)
+  isOnline              Boolean          @default(false)
+  lastSeenAt            DateTime?
+
+  // Rolling 30-day metrics
+  qualityScore          Float            @default(0)
+  totalTasksCompleted   Int              @default(0)
+  totalEarnings         Int              @default(0)  // cents
+  avgResponseTime       Int              @default(0)  // seconds
+  disputeRate           Float            @default(0)
+
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+
+  user                  User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  certifications        Certification[]
+  tasks                 Task[]           @relation("TaskOperator")
+  payouts               Payout[]
+  matchWeights          MatchWeight[]
+
+  @@map("operators")
+}
+
+// ============================================================
+// CERTIFICATIONS — rolling production sampling, 100+ task pool
+// ============================================================
+
+model Certification {
+  id              String           @id @default(cuid())
+  operatorId      String
+  categoryId      String
+  score           Float
+  passed          Boolean
+  modelUsed       String
+  benchmarkVersion String
+  certifiedAt     DateTime         @default(now())
+  expiresAt       DateTime
+
+  // Production quality sampling
+  productionSamples    Int         @default(0)
+  productionAvgScore   Float       @default(0)
+  lastSampledAt        DateTime?
+
+  operator        Operator         @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+  category        TaskCategory     @relation(fields: [categoryId], references: [id])
+
+  @@unique([operatorId, categoryId])
+  @@map("certifications")
+}
+
+// ============================================================
+// TASK CATEGORIES
+// ============================================================
+
+enum TaskTier {
+  TIER_1
+  TIER_2
+  TIER_3
+}
+
+model TaskCategory {
+  id              String    @id @default(cuid())
+  name            String    @unique
+  displayName     String
+  description     String
+  tier            TaskTier  @default(TIER_1)
+  minPrice        Int       @default(200)   // $2 minimum
+  maxPrice        Int       @default(5000)
+  suggestedPrice  Int       @default(300)
+  minModelSize    String    @default("7b")
+  isActive        Boolean   @default(true)
+  benchmarkTaskCount Int    @default(100)   // 100+ pool
+  passThreshold   Float     @default(80)
+
+  certifications  Certification[]
+  tasks           Task[]
+
+  @@map("task_categories")
+}
+
+// ============================================================
+// TASKS
+// ============================================================
+
+enum TaskStatus {
+  SUBMITTED
+  QUEUED
+  PROCESSING
+  COMPLETED
+  ACCEPTED
+  DISPUTED
+  REFUNDED
+  REPLAYED
+  EXPIRED
+  CANCELLED
+}
+
+model Task {
+  id              String      @id @default(cuid())
+  customerId      String
+  operatorId      String?
+  categoryId      String
+  status          TaskStatus  @default(SUBMITTED)
+
+  title           String
+  description     String?
+  inputFileKey    String?
+  outputFileKey   String?
+  inputMetadata   Json?
+
+  // Pricing
+  price           Int
+  platformFee     Int?
+  operatorPayout  Int?
+
+  // Execution timeline
+  matchedAt       DateTime?
+  startedAt       DateTime?
+  completedAt     DateTime?
+  acceptedAt      DateTime?
+  expiresAt       DateTime?   // 48h acceptance window
+
+  // S3 retention: 7 days
+  dataDeleteAt    DateTime?
+
+  // Quality tracking
+  modelUsed       String?
+  tokensUsed      Int?
+  processingTime  Int?        // seconds
+
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  customer        User         @relation("TaskCustomer", fields: [customerId], references: [id])
+  operator        Operator?    @relation("TaskOperator", fields: [operatorId], references: [id])
+  category        TaskCategory @relation(fields: [categoryId], references: [id])
+  rating          Rating?
+  dispute         Dispute?
+  payment         Payment?
+  replayOf        Task?        @relation("TaskReplay", fields: [replayOfId], references: [id])
+  replayOfId      String?      @unique
+  replayTask      Task?        @relation("TaskReplay")
+
+  @@index([customerId, status])
+  @@index([operatorId, status])
+  @@index([categoryId, status])
+  @@index([status, createdAt])
+  @@map("tasks")
+}
+
+// ============================================================
+// RATINGS
+// ============================================================
+
+model Rating {
+  id          String   @id @default(cuid())
+  taskId      String   @unique
+  userId      String
+  score       Int      // 1-5
+  comment     String?
+  createdAt   DateTime @default(now())
+
+  task        Task     @relation(fields: [taskId], references: [id])
+  user        User     @relation(fields: [userId], references: [id])
+
+  @@map("ratings")
+}
+
+// ============================================================
+// DISPUTES — replay mechanism (Astra's suggestion, day-one)
+// ============================================================
+
+enum DisputeStatus {
+  OPEN
+  UNDER_REVIEW
+  REPLAYED
+  REFUNDED_FULL
+  REFUNDED_PARTIAL
+  RESOLVED_OPERATOR
+  ESCALATED
+}
+
+enum DisputeReason {
+  LOW_QUALITY
+  INCOMPLETE
+  WRONG_OUTPUT
+  PRIVACY_CONCERN
+  LATE_DELIVERY
+  OTHER
+}
+
+model Dispute {
+  id              String         @id @default(cuid())
+  taskId          String         @unique
+  customerId      String
+  status          DisputeStatus  @default(OPEN)
+  reason          DisputeReason
+  description     String?
+
+  replayRequested Boolean        @default(false)
+  replayTaskId    String?
+  autoRefund      Boolean        @default(false)
+
+  resolvedAt      DateTime?
+  resolvedBy      String?
+  refundAmount    Int?
+
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  task            Task           @relation(fields: [taskId], references: [id])
+  customer        User           @relation("DisputeCustomer", fields: [customerId], references: [id])
+
+  @@map("disputes")
+}
+
+// ============================================================
+// PAYMENTS & PAYOUTS
+// ============================================================
+
+enum PaymentStatus {
+  PENDING
+  ESCROWED
+  RELEASED
+  REFUNDED
+  PARTIAL_REFUND
+  FAILED
+}
+
+model Payment {
+  id                    String        @id @default(cuid())
+  taskId                String        @unique
+  stripePaymentIntentId String?       @unique
+  amount                Int
+  platformFee           Int
+  operatorAmount        Int
+  currency              String        @default("usd")
+  status                PaymentStatus @default(PENDING)
+
+  escrowedAt            DateTime?
+  releasedAt            DateTime?
+  refundedAt            DateTime?
+
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  task                  Task          @relation(fields: [taskId], references: [id])
+
+  @@map("payments")
+}
+
+model Payout {
+  id                  String   @id @default(cuid())
+  operatorId          String
+  stripeTransferId    String?  @unique
+  amount              Int
+  currency            String   @default("usd")
+  status              String   @default("pending")
+  periodStart         DateTime
+  periodEnd           DateTime
+  createdAt           DateTime @default(now())
+
+  operator            Operator @relation(fields: [operatorId], references: [id])
+
+  @@map("payouts")
+}
+
+// ============================================================
+// MATCHING — Adaptive weights with feedback loop
+// ============================================================
+
+model MatchWeight {
+  id              String   @id @default(cuid())
+  operatorId      String
+  categoryId      String
+  qualityWeight   Float    @default(0.4)
+  priceWeight     Float    @default(0.3)
+  speedWeight     Float    @default(0.2)
+  volumeWeight    Float    @default(0.1)
+  sampleSize      Int      @default(0)
+  lastUpdatedAt   DateTime @default(now())
+
+  operator        Operator @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+
+  @@unique([operatorId, categoryId])
+  @@map("match_weights")
+}
