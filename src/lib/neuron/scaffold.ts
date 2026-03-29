@@ -4,6 +4,8 @@ import type {
   MemorySegment,
   ContextInjection,
   PersonalityConfig,
+  VoiceConfig,
+  CapabilityRequirement,
 } from './types';
 
 /**
@@ -18,17 +20,26 @@ export class ScaffoldManager {
     const existing = this.scaffolds.get(scaffoldId);
     if (existing) return existing;
 
+    const defaultCapReq: CapabilityRequirement = {
+      type: 'text',
+      minContextWindow: 4096,
+      speed: 'fast',
+    };
+
     const scaffold: Scaffold = {
       id: scaffoldId,
-      version: '0.1.0',
+      version: 1,
       ownerId: 'system',
+      createdAt: new Date().toISOString(),
       identity: {
+        name: 'DefaultAssistant',
+        role: 'general-purpose assistant',
         personality: {
           traits: { helpfulness: 0.9, creativity: 0.7, precision: 0.85 },
           constraints: ['Stay on topic', 'No harmful content'],
-          emotionalState: 'neutral',
+          emotionalState: { current: 'neutral', updatedAt: Date.now(), updatedBy: 'system' },
         },
-        voice: 'professional',
+        voice: { tone: 'professional', vocabulary: 'mixed', quirks: [] },
       },
       memory: {
         segments: [
@@ -38,6 +49,9 @@ export class ScaffoldManager {
             tags: ['preference', 'communication'],
             relevanceScore: 0.8,
             tokenCount: 12,
+            createdAt: new Date().toISOString(),
+            accessCount: 0,
+            source: 'user-conversation',
           },
           {
             id: uuid(),
@@ -45,6 +59,9 @@ export class ScaffoldManager {
             tags: ['history', 'marketplace'],
             relevanceScore: 0.6,
             tokenCount: 10,
+            createdAt: new Date().toISOString(),
+            accessCount: 0,
+            source: 'task-result',
           },
           {
             id: uuid(),
@@ -52,34 +69,50 @@ export class ScaffoldManager {
             tags: ['context', 'project', 'marketplace'],
             relevanceScore: 0.95,
             tokenCount: 14,
+            createdAt: new Date().toISOString(),
+            accessCount: 0,
+            source: 'user-conversation',
           },
         ],
+        maxSegments: 100,
+        evictionPolicy: 'least-relevant',
       },
-      capabilities: [
-        { name: 'text-generation', description: 'Generate text responses', maxTokens: 4096 },
-        { name: 'code-generation', description: 'Generate code snippets', maxTokens: 8192 },
-        { name: 'analysis', description: 'Analyse data and text', maxTokens: 4096 },
-      ],
+      capabilities: {
+        required: [{ type: 'text', minContextWindow: 4096, speed: 'fast' }],
+        preferred: [{ type: 'code', minContextWindow: 8192, speed: 'medium' }],
+        forbidden: ['execute-arbitrary-shell'],
+      },
       taskTemplates: [
         {
           id: 'default-pipeline',
           name: 'Default Sequential Pipeline',
           steps: [
-            { order: 0, neuronType: 'memory-processor', prompt: 'Retrieve relevant memories', maxTokens: 1024 },
-            { order: 1, neuronType: 'memory-injector', prompt: 'Compile context injection', maxTokens: 512 },
-            { order: 2, neuronType: 'executor', prompt: 'Execute primary task', maxTokens: 4096 },
-            { order: 3, neuronType: 'verifier', prompt: 'Verify output quality', maxTokens: 1024 },
+            { id: 'step-mem-proc', order: 0, neuronType: 'memory-processor', prompt: 'Retrieve relevant memories', maxTokens: 1024, count: 1, parallel: false, capabilityRequirements: defaultCapReq, dependsOn: [], negotiation: 'first-wins', maxRetries: 1, timeoutSeconds: 30 },
+            { id: 'step-mem-inj', order: 1, neuronType: 'memory-injector', prompt: 'Compile context injection', maxTokens: 512, count: 1, parallel: false, capabilityRequirements: defaultCapReq, dependsOn: ['step-mem-proc'], negotiation: 'first-wins', maxRetries: 1, timeoutSeconds: 30 },
+            { id: 'step-exec', order: 2, neuronType: 'executor', prompt: 'Execute primary task', maxTokens: 4096, count: 1, parallel: false, capabilityRequirements: defaultCapReq, dependsOn: ['step-mem-inj'], negotiation: 'first-wins', maxRetries: 2, timeoutSeconds: 60 },
+            { id: 'step-verify', order: 3, neuronType: 'verifier', prompt: 'Verify output quality', maxTokens: 1024, count: 1, parallel: false, capabilityRequirements: defaultCapReq, dependsOn: ['step-exec'], negotiation: 'first-wins', maxRetries: 1, timeoutSeconds: 30 },
           ],
           maxBudget: 8000,
         },
       ],
       routing: {
-        budgets: { free: 2000, standard: 8000, premium: 32000 },
-        tiers: { free: 'low', standard: 'normal', premium: 'high' },
+        defaultTier: 'B',
+        budgetPerTask: 8000,
+        budgetPerDay: 100000,
+        budgetSpentToday: 0,
+        maxNeuronsPerTask: 4,
+        timeoutSeconds: 300,
       },
       security: {
-        redactedFields: ['password', 'secret', 'token'],
-        clearanceTier: 3,
+        allowedDomains: ['*'],
+        blockedDomains: [],
+        dataClassification: 'internal',
+        piiPolicy: 'strip',
+        auditLog: true,
+        mask: {
+          redactedFields: ['password', 'secret', 'token'],
+          clearanceTier: 3,
+        },
       },
     };
 
@@ -109,7 +142,7 @@ export class ScaffoldManager {
     return {
       memories,
       personality: scaffold.identity.personality,
-      securityMask: scaffold.security,
+      securityMask: scaffold.security.mask,
     };
   }
 
@@ -117,7 +150,11 @@ export class ScaffoldManager {
   updateEmotionalState(scaffoldId: string, newState: string): void {
     const scaffold = this.scaffolds.get(scaffoldId);
     if (scaffold) {
-      scaffold.identity.personality.emotionalState = newState;
+      scaffold.identity.personality.emotionalState = {
+        current: newState,
+        updatedAt: Date.now(),
+        updatedBy: 'system',
+      };
     }
   }
 

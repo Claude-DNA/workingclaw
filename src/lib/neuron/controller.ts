@@ -7,6 +7,7 @@ import type {
   ControllerState,
   BudgetTracker,
   ContextInjection,
+  CapabilityRequirement,
 } from './types';
 import { NeuronMessageBus } from './message-bus';
 import { NeuronRegistry } from './registry';
@@ -155,11 +156,17 @@ export class ControllerNeuron {
     scaffoldId: string,
     classification: TaskClassification
   ): ActivePipeline {
+    const defaultCapReq: CapabilityRequirement = {
+      type: 'text',
+      minContextWindow: 4096,
+      speed: 'fast',
+    };
+
     const steps: NeuronStep[] = [
-      { order: 0, neuronType: 'memory-processor', prompt: 'Retrieve and rank relevant memories', maxTokens: 1024 },
-      { order: 1, neuronType: 'memory-injector', prompt: 'Compile context injection', maxTokens: 512 },
-      { order: 2, neuronType: 'executor', prompt: 'Execute primary task', maxTokens: 4096 },
-      { order: 3, neuronType: 'verifier', prompt: 'Verify output quality and safety', maxTokens: 1024 },
+      { id: 'step-0', order: 0, neuronType: 'memory-processor', prompt: 'Retrieve and rank relevant memories', maxTokens: 1024, count: 1, parallel: false, capabilityRequirements: defaultCapReq, dependsOn: [], negotiation: 'first-wins', maxRetries: 1, timeoutSeconds: 30 },
+      { id: 'step-1', order: 1, neuronType: 'memory-injector', prompt: 'Compile context injection', maxTokens: 512, count: 1, parallel: false, capabilityRequirements: defaultCapReq, dependsOn: ['step-0'], negotiation: 'first-wins', maxRetries: 1, timeoutSeconds: 30 },
+      { id: 'step-2', order: 2, neuronType: 'executor', prompt: 'Execute primary task', maxTokens: 4096, count: 1, parallel: false, capabilityRequirements: defaultCapReq, dependsOn: ['step-1'], negotiation: 'first-wins', maxRetries: 2, timeoutSeconds: 60 },
+      { id: 'step-3', order: 3, neuronType: 'verifier', prompt: 'Verify output quality and safety', maxTokens: 1024, count: 1, parallel: false, capabilityRequirements: defaultCapReq, dependsOn: ['step-2'], negotiation: 'first-wins', maxRetries: 1, timeoutSeconds: 30 },
     ];
 
     const activeSteps: ActiveStep[] = steps.map((step) => ({
