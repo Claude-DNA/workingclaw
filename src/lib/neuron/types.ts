@@ -1,4 +1,21 @@
 // ─── Neuron Cloud Protocol — Type Definitions ───
+//
+// Design Principles (locked Mar 30 2026 — Discussion #2):
+//
+// 1. STIGMERGY — Routing emerges from messages (NeuronMessages as
+//    pheromone trails), not from a central dispatcher. Neurons react
+//    to the environment, not to commands.
+//
+// 2. ROLE ELASTICITY — Any neuron can serve any role if it meets the
+//    capability requirements. Roles are task-scoped, not identity-fixed.
+//
+// 3. NO CENTRAL COMMAND — No god component. The controller is itself
+//    a disposable micro-task. Coordination is emergent, not hierarchical.
+//
+// 4. GRACEFUL DEGRADATION — The swarm doesn't fail when a neuron dies.
+//    Mark task failed, reroute, don't cascade panic. Individual neuron
+//    death never collapses the colony.
+//
 
 /** Union of all neuron roles in the cloud */
 export type NeuronType =
